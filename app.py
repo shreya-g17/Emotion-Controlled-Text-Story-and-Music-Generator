@@ -12,82 +12,120 @@ load_dotenv(BASE_DIR / ".env", override=True)
 
 MUSIC_DIR = BASE_DIR / "music"
 
-MODEL_NAME = (
-    os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
-    or "gemini-3.8-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"
+MODEL_NAME = os.getenv("GEMINI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+
+# Tried in order after MODEL_NAME. All are text models with a free tier.
+PREFERRED_FALLBACKS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+]
+
+# Models matching these words are NOT text generators (or have no free tier).
+EXCLUDED_KEYWORDS = (
+    "image", "imagen", "veo", "tts", "audio", "live", "embedding",
+    "aqa", "robotics", "computer-use", "native-audio", "learnlm",
 )
+
+# On these errors we move on to the next model instead of failing.
+SKIP_TO_NEXT_MODEL = {404, 429, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 
 st.set_page_config(
     page_title="MoodMuse - Generative AI",
     page_icon="🎭",
-    layout="centered"
+    layout="centered",
 )
 
 EMOTIONS = {
     "Happy": {
         "emoji": "😊",
         "description": "Cheerful, optimistic and uplifting",
-        "music_file": "happy.mp3"
+        "music_file": "happy.mp3",
     },
     "Sad": {
         "emoji": "😢",
         "description": "Gentle, reflective and comforting",
-        "music_file": "sad.mp3"
+        "music_file": "sad.mp3",
     },
     "Angry": {
         "emoji": "😡",
         "description": "Calm, thoughtful and non-aggressive",
-        "music_file": "angry.mp3"
+        "music_file": "angry.mp3",
     },
     "Relaxed": {
         "emoji": "😌",
         "description": "Peaceful, slow and soothing",
-        "music_file": "relaxed.mp3"
+        "music_file": "relaxed.mp3",
     },
     "Fearful": {
         "emoji": "😨",
         "description": "Reassuring, gentle and encouraging",
-        "music_file": "fearful.mp3"
-    }
+        "music_file": "fearful.mp3",
+    },
 }
 
+
+# ---------------------------------------------------------------------------
 # API CONFIGURATION
+# ---------------------------------------------------------------------------
 
 def get_ai_client():
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
-
     if not api_key:
-        raise ValueError(
-            "Gemini API key not found. Check your .env file."
-        )
-
+        raise ValueError("Gemini API key not found. Check your .env file.")
     return genai.Client(api_key=api_key)
 
 
-def get_fallback_models(client, excluded_model):
-    models = client.models.list()
-    candidates = []
+def is_text_model(name):
+    lowered = name.lower()
+    return not any(word in lowered for word in EXCLUDED_KEYWORDS)
 
-    for model in models:
+
+def discover_text_models(client):
+    """Ask the API for text-capable models, excluding image/audio/etc."""
+    found = []
+    for model in client.models.list():
         name = getattr(model, "name", None)
-        supported_actions = getattr(model, "supported_actions", None) or []
-        if (
-            name
-            and "generateContent" in supported_actions
-            and name.rsplit("/", 1)[-1] != excluded_model
-        ):
-            candidates.append(name.rsplit("/", 1)[-1])
-
+        actions = getattr(model, "supported_actions", None) or []
+        if not name or "generateContent" not in actions:
+            continue
+        short = name.rsplit("/", 1)[-1]
+        if is_text_model(short):
+            found.append(short)
+    # Prefer flash / lite models (cheaper, free-tier friendly)
     return sorted(
-        set(candidates),
-        key=lambda name: ("flash" not in name.lower(), name.lower())
-    )[:3]
+        set(found),
+        key=lambda n: ("flash" not in n.lower(), n.lower()),
+    )
 
 
-# GENERATIVE AI CONTENT FUNCTION
+def candidate_models(client):
+    """Yield models lazily: configured one, known-good ones, then discovered."""
+    seen = set()
 
-def generate_content(client, emotion, content_type, topic, length):
+    for name in [MODEL_NAME, *PREFERRED_FALLBACKS]:
+        if name not in seen:
+            seen.add(name)
+            yield name
 
+    try:
+        discovered = discover_text_models(client)
+    except errors.APIError:
+        return
+
+    for name in discovered[:5]:
+        if name not in seen:
+            seen.add(name)
+            yield name
+
+
+# ---------------------------------------------------------------------------
+# PROMPT BUILDING
+# ---------------------------------------------------------------------------
+
+def build_prompt(emotion, content_type, topic, length):
     emotion_description = EMOTIONS[emotion]["description"]
 
     if content_type == "Story":
@@ -96,14 +134,12 @@ def generate_content(client, emotion, content_type, topic, length):
         Include a beginning, middle and ending.
         Make the characters, events and setting creative.
         """
-
     elif content_type == "Text":
         task = f"""
         Write an original message of approximately {min(length, 200)} words.
         Make it meaningful, natural and emotionally expressive.
         Avoid generic quotes and copied phrases.
         """
-
     else:
         task = """
         Write original song lyrics.
@@ -118,7 +154,7 @@ def generate_content(client, emotion, content_type, topic, length):
         Do not generate or claim to generate an audio file.
         """
 
-    prompt = f"""
+    return f"""
     You are MoodMuse, an AI creative writing assistant.
 
     Generate completely new content based on the user's choices.
@@ -143,84 +179,67 @@ def generate_content(client, emotion, content_type, topic, length):
     Return only the generated content.
     """
 
-    retryable_status_codes = {500, 502, 503, 504}
-    last_error = None
+
+# ---------------------------------------------------------------------------
+# GENERATION
+# ---------------------------------------------------------------------------
+
+class EmptyResponseError(RuntimeError):
+    pass
+
+
+def call_model(client, model, prompt):
+    """Call one model, retrying briefly on temporary server errors."""
     for attempt in range(3):
         try:
             response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt
+                model=model,
+                contents=prompt,
             )
-            content = getattr(response, "text", "")
-            if not content:
-                raise RuntimeError(
-                    "Gemini returned an empty response. Try another prompt."
-                )
-            return content.strip()
+            text = (getattr(response, "text", "") or "").strip()
+            if not text:
+                raise EmptyResponseError(f"{model} returned an empty response.")
+            return text
         except errors.APIError as error:
-            last_error = error
-            if error.code in retryable_status_codes and attempt < 2:
+            if error.code in RETRYABLE_STATUS_CODES and attempt < 2:
                 time.sleep(2 ** attempt)
                 continue
-            if error.code not in retryable_status_codes and error.code != 404:
+            raise
+
+
+def generate_content(client, emotion, content_type, topic, length):
+    prompt = build_prompt(emotion, content_type, topic, length)
+
+    tried = []
+    last_error = None
+
+    for model in candidate_models(client):
+        try:
+            return call_model(client, model, prompt)
+        except EmptyResponseError as error:
+            last_error = error
+            tried.append(f"{model} (empty response)")
+        except errors.APIError as error:
+            last_error = error
+            tried.append(f"{model} (HTTP {error.code})")
+            if error.code not in SKIP_TO_NEXT_MODEL:
+                # Bad API key, invalid request, etc. Other models won't help.
                 raise RuntimeError(
-                    f"Gemini request failed for model '{MODEL_NAME}' "
+                    f"Gemini request failed for model '{model}' "
                     f"(HTTP {error.code}): {error}"
                 ) from error
-            break
 
-    try:
-        fallback_models = get_fallback_models(client, MODEL_NAME)
-    except errors.APIError as error:
-        fallback_models = []
-        fallback_discovery_error = error
-    else:
-        fallback_discovery_error = None
-
-    for model_name in fallback_models:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            content = getattr(response, "text", "")
-            if not content:
-                raise RuntimeError(
-                    "Gemini returned an empty response. Try another prompt."
-                )
-            return content.strip()
-        except errors.APIError as error:
-            if error.code not in retryable_status_codes and error.code != 404:
-                raise RuntimeError(
-                    f"Gemini request failed for fallback model "
-                    f"'{model_name}' (HTTP {error.code}): {error}"
-                ) from error
-            last_error = error
-
-    if last_error is None:
-        raise RuntimeError("Gemini model could not generate a response.")
-
-    if not fallback_models and last_error.code == 404:
-        raise RuntimeError(
-            f"Gemini model '{MODEL_NAME}' is unavailable and no alternate "
-            "generation models were found for this API key. Check GEMINI_MODEL "
-            "and the models enabled for your Gemini API key."
-        ) from last_error
-
-    fallback_note = (
-        f" Model discovery also failed: {fallback_discovery_error}"
-        if fallback_discovery_error
-        else ""
-    )
-    tried_fallbacks = ", ".join(fallback_models) or "none"
+    summary = ", ".join(tried) or "none"
     raise RuntimeError(
-        f"Gemini could not generate content with model '{MODEL_NAME}' "
-        f"(HTTP {last_error.code}); supported fallbacks tried: "
-        f"{tried_fallbacks}. Try again later or check your API quota."
-        f"{fallback_note}"
+        "No Gemini model could generate a response. "
+        f"Models tried: {summary}. "
+        "Check GEMINI_MODEL in your .env, your API key, and your quota."
     ) from last_error
 
+
+# ---------------------------------------------------------------------------
 # MUSIC PLAYBACK
+# ---------------------------------------------------------------------------
 
 def show_music_player(emotion):
     filename = EMOTIONS[emotion]["music_file"]
@@ -238,80 +257,63 @@ def show_music_player(emotion):
         )
 
 
-st.title("🎭 MoodMuse")
-st.subheader(
-    "Emotion-Controlled Story, Text and Music Generator"
-)
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
 
+st.title("🎭 MoodMuse")
+st.subheader("Emotion-Controlled Story, Text and Music Generator")
 st.write(
     "Select an emotion and let a Generative AI model create "
     "original content to match it."
 )
-
 st.divider()
 
-# Emotion selection
 emotion = st.selectbox(
     "Choose an emotion",
     options=list(EMOTIONS.keys()),
-    format_func=lambda value: (
-        f"{EMOTIONS[value]['emoji']} {value}"
-    )
+    format_func=lambda value: f"{EMOTIONS[value]['emoji']} {value}",
 )
-
 st.write(EMOTIONS[emotion]["description"])
 
-# Content selection
 content_type = st.radio(
     "What would you like the AI to create?",
     options=["Story", "Text", "Music"],
-    horizontal=True
+    horizontal=True,
 )
 
-# User preferences
 topic = st.text_input(
     "Enter a topic (optional)",
-    placeholder="e.g. friendship, exams, adventure, nature"
+    placeholder="e.g. friendship, exams, adventure, nature",
 )
 
 if content_type == "Story":
     length = st.slider(
         "Approximate story length (words)",
-        min_value=100,
-        max_value=500,
-        value=200,
-        step=50
+        min_value=100, max_value=500, value=200, step=50,
     )
 elif content_type == "Text":
     length = st.slider(
         "Approximate message length (words)",
-        min_value=30,
-        max_value=200,
-        value=80,
-        step=10
+        min_value=30, max_value=200, value=80, step=10,
     )
 else:
     length = 150
 
-st.caption(f"AI model: {MODEL_NAME}")
+st.caption(f"Preferred AI model: {MODEL_NAME}")
 
-# Generate button
 if st.button("✨ Generate with AI", type="primary"):
     try:
-        with st.spinner(
-            "The AI model is creating original content..."
-        ):
+        with st.spinner("The AI model is creating original content..."):
             client = get_ai_client()
-
             result = generate_content(
                 client=client,
                 emotion=emotion,
                 content_type=content_type,
                 topic=topic,
-                length=length
+                length=length,
             )
 
-        # Save the actual model response
         st.session_state["result"] = result
         st.session_state["result_emotion"] = emotion
         st.session_state["result_type"] = content_type
@@ -319,11 +321,7 @@ if st.button("✨ Generate with AI", type="primary"):
 
     except Exception as error:
         st.session_state["result"] = None
-        st.session_state["generation_error"] = (
-            f"{type(error).__name__}: {error}"
-        )
-
-# DISPLAY MODEL OUTPUT
+        st.session_state["generation_error"] = f"{type(error).__name__}: {error}"
 
 if st.session_state.get("generation_error"):
     st.error(
@@ -340,10 +338,8 @@ if st.session_state.get("result"):
 
     st.divider()
     st.subheader(
-        f"{EMOTIONS[result_emotion]['emoji']} "
-        f"AI-Generated {result_type}"
+        f"{EMOTIONS[result_emotion]['emoji']} AI-Generated {result_type}"
     )
-
     st.markdown(result)
 
     if result_type == "Music":
@@ -352,14 +348,9 @@ if st.session_state.get("result"):
     st.download_button(
         label="⬇️ Download generated content",
         data=result,
-        file_name=(
-            f"{result_emotion.lower()}_"
-            f"{result_type.lower()}.txt"
-        ),
-        mime="text/plain"
+        file_name=f"{result_emotion.lower()}_{result_type.lower()}.txt",
+        mime="text/plain",
     )
 
 st.divider()
-st.caption(
-    "MoodMuse | Generative AI Project | Python, Streamlit and Gemini"
-)
+st.caption("MoodMuse | Generative AI Project | Python, Streamlit and Gemini")

@@ -1,6 +1,9 @@
 import os
 import time
 from pathlib import Path
+from gtts import gTTS
+from PIL import Image
+from io import BytesIO
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -35,7 +38,7 @@ RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 st.set_page_config(
     page_title="MoodMuse - Generative AI",
     page_icon="🎭",
-    layout="centered",
+    layout="wide",
 )
 
 EMOTIONS = {
@@ -66,7 +69,16 @@ EMOTIONS = {
     },
 }
 
+EMOTION_IMAGES = {
+    "Happy": BASE_DIR / "assets" / "emotions" / "happy.jpeg",
+    "Sad": BASE_DIR / "assets" / "emotions" / "sad.jpeg",
+    "Angry": BASE_DIR / "assets" / "emotions" / "angry.jpeg",
+    "Relaxed": BASE_DIR / "assets" / "emotions" / "relaxed.jpeg",
+    "Fearful": BASE_DIR / "assets" / "emotions" / "fearful.jpeg",
+}
 
+# for name, path in EMOTION_IMAGES.items():
+#     st.write(name, path, path.exists())
 # ---------------------------------------------------------------------------
 # API CONFIGURATION
 # ---------------------------------------------------------------------------
@@ -241,40 +253,251 @@ def generate_content(client, emotion, content_type, topic, length):
 # MUSIC PLAYBACK
 # ---------------------------------------------------------------------------
 
+
 def show_music_player(emotion):
+    st.subheader("🎧 Listen to Music")
+
+    # Option 1: Upload an audio file
+    uploaded_audio = st.file_uploader(
+        "Upload your own music (MP3 or WAV)",
+        type=["mp3", "wav","mp4"],
+        key=f"music_upload_{emotion}"
+    )
+
+    if uploaded_audio is not None:
+        st.success("Music uploaded successfully!")
+        st.audio(
+            uploaded_audio.getvalue(),
+            format=uploaded_audio.type
+        )
+
+        st.download_button(
+            label="⬇️ Download uploaded music",
+            data=uploaded_audio.getvalue(),
+            file_name=uploaded_audio.name,
+            mime=uploaded_audio.type
+        )
+
+        return
+
+    # Option 2: Play an existing music file from your folder
     filename = EMOTIONS[emotion]["music_file"]
     music_path = MUSIC_DIR / filename
 
     if music_path.is_file():
-        st.subheader("🎧 Listen to matching music")
+        st.write("Or listen to the default emotion-based track:")
         st.audio(str(music_path), format="audio/mp3")
         st.caption(f"Track: {filename}")
     else:
         st.info(
-            f"To enable audio playback, add a suitable MP3 file "
-            f"named '{filename}' to the music folder. "
-            "The AI-generated lyrics are available above."
+            "No default music file found. "
+            "Upload an MP3 or WAV file above to listen to music."
         )
 
+#narration of story and text
+def generate_narration(text):
+    tts = gTTS(text=text, lang="en", slow=False)
+
+    audio_buffer = BytesIO()
+    tts.write_to_fp(audio_buffer)
+
+    audio_buffer.seek(0)
+
+    return audio_buffer.getvalue()
 
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
 
-st.title("🎭 MoodMuse")
-st.subheader("Emotion-Controlled Story, Text and Music Generator")
-st.write(
-    "Select an emotion and let a Generative AI model create "
-    "original content to match it."
-)
+# CUSTOM UI DESIGN
+st.markdown("""
+<style>
+
+/* Main background */
+.stApp {
+    background: linear-gradient(135deg, #100d24, #21143d, #17112e);
+    color: #f5f0ff;
+}
+
+/* Main content width */
+.block-container {
+    max-width: 1100px;
+    padding-top: 4rem;
+    padding-bottom: 3rem;
+}
+
+/* Headings */
+h1 {
+    color: #e5c8ff !important;
+    font-size: 3rem !important;
+    font-weight: 800 !important;
+}
+
+h2, h3 {
+    color: #d9b8ff !important;
+}
+
+/* Regular text */
+p, label, .stMarkdown {
+    color: #eee7ff;
+}
+
+/* Buttons */
+.stButton > button {
+    background: linear-gradient(90deg, #a855f7, #7c3aed);
+    color: white;
+    border: none;
+    border-radius: 14px;
+    padding: 0.65rem 1.3rem;
+    font-weight: 700;
+    transition: 0.2s;
+}
+
+.stButton > button:hover {
+    background: linear-gradient(90deg, #c084fc, #9333ea);
+    border: none;
+    transform: translateY(-2px);
+}
+
+/* Input boxes */
+.stTextInput input {
+    background-color: #292044;
+    color: white;
+    border-radius: 12px;
+}
+
+/* Select boxes */
+.stSelectbox div[data-baseweb="select"] > div {
+    background-color: #292044;
+    border-radius: 12px;
+}
+
+/* Radio buttons */
+.stRadio {
+    background-color: #211a38;
+    padding: 15px;
+    border-radius: 14px;
+}
+
+/* Download buttons */
+.stDownloadButton > button {
+    border: 1px solid #a855f7;
+    border-radius: 12px;
+}
+
+/* Dividers */
+hr {
+    border-color: #594477;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# st.title("🎭 MoodMuse")
+# st.subheader("Emotion-Controlled Story, Text and Music Generator")
+
+# MoodMuse Title Banner
+background_path = BASE_DIR / "assets" / "moodmuse_bg.jpeg"
+
+import base64
+
+with open(background_path, "rb") as image_file:
+    encoded_image = base64.b64encode(image_file.read()).decode()
+
+st.markdown(f"""
+<div style="
+    text-align:center;
+    padding:30px 15px;
+    background:
+        linear-gradient(rgba(35,15,60,0.55), rgba(35,15,60,0.55)),
+        url('data:image/jpeg;base64,{encoded_image}');
+    background-size:cover;
+    background-position:center;
+    border:1px solid #8b5cf6;
+    border-radius:22px;
+    margin-bottom:25px;
+">
+    <h1 style="color:white !important; margin:0;">
+        🎭 MoodMuse
+    </h1>
+    <p style="font-size:18px; color:#eadcff;">
+        Turn your emotions into stories, words and music.
+    </p>
+    <p style="font-size:13px; color:#d6c3f2;">
+        YOUR EMOTIONS. YOUR CREATIVITY. YOUR WORLD.
+    </p>
+</div>
+""", unsafe_allow_html=True)
+# st.write(
+#     st.session_state.generated_content)
+
 st.divider()
 
-emotion = st.selectbox(
-    "Choose an emotion",
-    options=list(EMOTIONS.keys()),
-    format_func=lambda value: f"{EMOTIONS[value]['emoji']} {value}",
+# emotion = st.selectbox(
+#     "Choose an emotion",
+#     options=list(EMOTIONS.keys()),
+#     format_func=lambda value: f"{EMOTIONS[value]['emoji']} {value}",
+# )
+# st.write(EMOTIONS[emotion]["description"])
+
+# EMOTION SELECTION CARDS
+
+st.markdown("### ✨ How are you feeling today?")
+st.caption("Choose an emotion to personalise your experience.")
+
+if "selected_emotion" not in st.session_state:
+    st.session_state.selected_emotion = "Happy"
+
+emotions = list(EMOTIONS.keys())
+columns = st.columns(5)
+
+for i, emotion_option in enumerate(emotions):
+    with columns[i]:
+
+        # Display emotion picture
+        image_path = EMOTION_IMAGES[emotion_option]
+
+        # if image_path.is_file():
+        #     st.image(str(image_path), use_container_width=True)
+        # else:
+        #     st.warning(f"Image missing: {emotion_option}")
+        if image_path.is_file():
+            img = Image.open(image_path).convert("RGB")
+
+            # Crop all images to a square (1:1) ratio
+            width, height = img.size
+            side = min(width, height)
+
+            left = (width - side) // 2
+            top = (height - side) // 2
+
+            img = img.crop((
+                left,
+                top,
+                left + side,
+                top + side
+            ))
+
+            st.image(img, use_container_width=True)
+
+        # Clickable selection button
+        selected = st.session_state.selected_emotion == emotion_option
+
+        if st.button(
+            f"✓ {emotion_option}" if selected else emotion_option,
+            key=f"emotion_card_{emotion_option}",
+            type="primary" if selected else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.selected_emotion = emotion_option
+            st.rerun()
+
+emotion = st.session_state.selected_emotion
+
+st.info(
+    f"{emotion}: {EMOTIONS[emotion]['description']}"
 )
-st.write(EMOTIONS[emotion]["description"])
+
 
 content_type = st.radio(
     "What would you like the AI to create?",
@@ -318,6 +541,7 @@ if st.button("✨ Generate with AI", type="primary"):
         st.session_state["result_emotion"] = emotion
         st.session_state["result_type"] = content_type
         st.session_state["generation_error"] = None
+        st.session_state["narration_audio"] = None
 
     except Exception as error:
         st.session_state["result"] = None
@@ -331,6 +555,7 @@ if st.session_state.get("generation_error"):
     with st.expander("Technical details"):
         st.code(st.session_state["generation_error"])
 
+
 if st.session_state.get("result"):
     result = st.session_state["result"]
     result_emotion = st.session_state["result_emotion"]
@@ -342,9 +567,39 @@ if st.session_state.get("result"):
     )
     st.markdown(result)
 
+    # Music playback
     if result_type == "Music":
         show_music_player(result_emotion)
 
+    # Story and Text narration
+    elif result_type in ["Story", "Text"]:
+
+        if st.button("🔊 Generate Narration"):
+            try:
+                with st.spinner("Generating audio narration..."):
+                    audio_data = generate_narration(result)
+
+                st.session_state["narration_audio"] = audio_data
+
+            except Exception as error:
+                st.error(f"Narration failed: {error}")
+
+        if st.session_state.get("narration_audio"):
+            st.subheader("🎧 Listen to Narration")
+
+            st.audio(
+                st.session_state["narration_audio"],
+                format="audio/mp3"
+            )
+
+            st.download_button(
+                "⬇️ Download Narration",
+                data=st.session_state["narration_audio"],
+                file_name="moodmuse_narration.mp3",
+                mime="audio/mpeg"
+            )
+
+    # Download generated text
     st.download_button(
         label="⬇️ Download generated content",
         data=result,
@@ -353,4 +608,4 @@ if st.session_state.get("result"):
     )
 
 st.divider()
-st.caption("MoodMuse | Generative AI Project | Python, Streamlit and Gemini")
+st.caption("MoodMuse | Generative AI  | Python, Streamlit and Gemini")

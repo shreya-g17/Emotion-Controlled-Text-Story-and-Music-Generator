@@ -1,19 +1,21 @@
+import base64
 import os
 import time
-from pathlib import Path
-from gtts import gTTS
-from PIL import Image
 from io import BytesIO
+from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors
+from gtts import gTTS
+from PIL import Image
 
 BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env", override=True)
 
 MUSIC_DIR = BASE_DIR / "music"
+BANNER_PATH = BASE_DIR / "assets" / "moodmuse_bg.jpeg"
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 MODEL_NAME = os.getenv("GEMINI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
@@ -41,44 +43,47 @@ st.set_page_config(
     layout="wide",
 )
 
+# Each emotion has its own accent colour. The whole page picks it up
+# (buttons, borders, glow), so the app "feels" like the selected mood.
 EMOTIONS = {
     "Happy": {
         "emoji": "😊",
         "description": "Cheerful, optimistic and uplifting",
         "music_file": "happy.mp3",
+        "accent": "#fbbf24",
+        "image": BASE_DIR / "assets" / "emotions" / "happy.jpeg",
     },
     "Sad": {
         "emoji": "😢",
         "description": "Gentle, reflective and comforting",
         "music_file": "sad.mp3",
+        "accent": "#60a5fa",
+        "image": BASE_DIR / "assets" / "emotions" / "sad.jpeg",
     },
     "Angry": {
         "emoji": "😡",
         "description": "Calm, thoughtful and non-aggressive",
         "music_file": "angry.mp3",
+        "accent": "#f87171",
+        "image": BASE_DIR / "assets" / "emotions" / "angry.jpeg",
     },
     "Relaxed": {
         "emoji": "😌",
         "description": "Peaceful, slow and soothing",
         "music_file": "relaxed.mp3",
+        "accent": "#34d399",
+        "image": BASE_DIR / "assets" / "emotions" / "relaxed.jpeg",
     },
     "Fearful": {
         "emoji": "😨",
         "description": "Reassuring, gentle and encouraging",
         "music_file": "fearful.mp3",
+        "accent": "#c084fc",
+        "image": BASE_DIR / "assets" / "emotions" / "fearful.jpeg",
     },
 }
 
-EMOTION_IMAGES = {
-    "Happy": BASE_DIR / "assets" / "emotions" / "happy.jpeg",
-    "Sad": BASE_DIR / "assets" / "emotions" / "sad.jpeg",
-    "Angry": BASE_DIR / "assets" / "emotions" / "angry.jpeg",
-    "Relaxed": BASE_DIR / "assets" / "emotions" / "relaxed.jpeg",
-    "Fearful": BASE_DIR / "assets" / "emotions" / "fearful.jpeg",
-}
 
-# for name, path in EMOTION_IMAGES.items():
-#     st.write(name, path, path.exists())
 # ---------------------------------------------------------------------------
 # API CONFIGURATION
 # ---------------------------------------------------------------------------
@@ -250,42 +255,59 @@ def generate_content(client, emotion, content_type, topic, length):
 
 
 # ---------------------------------------------------------------------------
-# MUSIC PLAYBACK
+# MEDIA HELPERS
 # ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def load_square_image(path_str):
+    """Load an image and centre-crop it to a square. Cached for speed."""
+    img = Image.open(path_str).convert("RGB")
+    width, height = img.size
+    side = min(width, height)
+    left = (width - side) // 2
+    top = (height - side) // 2
+    return img.crop((left, top, left + side, top + side))
+
+
+@st.cache_data(show_spinner=False)
+def load_banner_base64(path_str):
+    with open(path_str, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
+def generate_narration(text):
+    tts = gTTS(text=text, lang="en", slow=False)
+    audio_buffer = BytesIO()
+    tts.write_to_fp(audio_buffer)
+    audio_buffer.seek(0)
+    return audio_buffer.getvalue()
 
 
 def show_music_player(emotion):
-    st.subheader("🎧 Listen to Music")
+    st.markdown("#### 🎧 Listen to music")
 
-    # Option 1: Upload an audio file
     uploaded_audio = st.file_uploader(
         "Upload your own music (MP3 or WAV)",
-        type=["mp3", "wav","mp4"],
-        key=f"music_upload_{emotion}"
+        type=["mp3", "wav"],
+        key=f"music_upload_{emotion}",
     )
 
     if uploaded_audio is not None:
         st.success("Music uploaded successfully!")
-        st.audio(
-            uploaded_audio.getvalue(),
-            format=uploaded_audio.type
-        )
-
+        st.audio(uploaded_audio.getvalue(), format=uploaded_audio.type)
         st.download_button(
             label="⬇️ Download uploaded music",
             data=uploaded_audio.getvalue(),
             file_name=uploaded_audio.name,
-            mime=uploaded_audio.type
+            mime=uploaded_audio.type,
         )
-
         return
 
-    # Option 2: Play an existing music file from your folder
     filename = EMOTIONS[emotion]["music_file"]
     music_path = MUSIC_DIR / filename
 
     if music_path.is_file():
-        st.write("Or listen to the default emotion-based track:")
+        st.write("Or listen to the default track for this emotion:")
         st.audio(str(music_path), format="audio/mp3")
         st.caption(f"Track: {filename}")
     else:
@@ -294,221 +316,352 @@ def show_music_player(emotion):
             "Upload an MP3 or WAV file above to listen to music."
         )
 
-#narration of story and text
-def generate_narration(text):
-    tts = gTTS(text=text, lang="en", slow=False)
-
-    audio_buffer = BytesIO()
-    tts.write_to_fp(audio_buffer)
-
-    audio_buffer.seek(0)
-
-    return audio_buffer.getvalue()
 
 # ---------------------------------------------------------------------------
-# UI
+# STYLING
 # ---------------------------------------------------------------------------
 
-# CUSTOM UI DESIGN
-st.markdown("""
+# State is read first so the accent colour can be applied to the whole page.
+if "selected_emotion" not in st.session_state:
+    st.session_state.selected_emotion = "Happy"
+
+emotion = st.session_state.selected_emotion
+accent = EMOTIONS[emotion]["accent"]
+
+# Per-emotion accent as CSS variables
+st.markdown(
+    f"""
+    <style>
+    :root {{
+        --accent: {accent};
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Main stylesheet (plain string, so CSS braces need no escaping)
+st.markdown(
+    """
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=DM+Sans:wght@400;500;700&display=swap');
 
-/* Main background */
-.stApp {
-    background: linear-gradient(135deg, #100d24, #21143d, #17112e);
-    color: #f5f0ff;
+:root {
+    --bg-1: #100d24;
+    --bg-2: #1a1233;
+    --surface: #211a38;
+    --surface-2: #2b2147;
+    --border: #3d3060;
+    --text: #f5f0ff;
+    --text-soft: #c9bde6;
 }
 
-/* Main content width */
+html, body, .stApp, [class*="css"] {
+    font-family: 'DM Sans', system-ui, sans-serif;
+}
+
+/* ---------- Page ---------- */
+.stApp {
+    background:
+        radial-gradient(900px 500px at 85% -10%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 70%),
+        linear-gradient(160deg, var(--bg-1), var(--bg-2) 60%, #140f29);
+    color: var(--text);
+}
+
+header[data-testid="stHeader"] { background: transparent; }
+
 .block-container {
     max-width: 1100px;
-    padding-top: 4rem;
+    padding-top: 3rem;
     padding-bottom: 3rem;
 }
 
-/* Headings */
-h1 {
-    color: #e5c8ff !important;
-    font-size: 3rem !important;
+/* ---------- Text: every text element gets a readable colour ---------- */
+h1, h2, h3, h4, h5 {
+    font-family: 'Fraunces', Georgia, serif;
+    color: var(--text) !important;
+    letter-spacing: -0.01em;
+}
+p, li, label, span, .stMarkdown, [data-testid="stMarkdownContainer"] {
+    color: var(--text);
+}
+[data-testid="stCaptionContainer"], .stCaption, small {
+    color: var(--text-soft) !important;
+}
+hr { border-color: var(--border) !important; }
+
+/* ---------- Hero banner ---------- */
+.hero {
+    text-align: center;
+    padding: 44px 20px;
+    border: 1px solid var(--accent);
+    border-radius: 24px;
+    margin-bottom: 28px;
+    box-shadow: 0 0 40px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.hero h1 {
+    font-size: 3.2rem !important;
     font-weight: 800 !important;
+    margin: 0 0 6px 0 !important;
+    color: #ffffff !important;
+}
+.hero p.tagline {
+    font-size: 1.15rem;
+    color: #f1e8ff !important;
+    margin: 0;
 }
 
-h2, h3 {
-    color: #d9b8ff !important;
-}
-
-/* Regular text */
-p, label, .stMarkdown {
-    color: #eee7ff;
-}
-
-/* Buttons */
-.stButton > button {
-    background: linear-gradient(90deg, #a855f7, #7c3aed);
-    color: white;
-    border: none;
+/* ---------- Emotion info strip (replaces the invisible st.info) ---------- */
+.mood-strip {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 18px;
+    margin: 14px 0 22px 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 5px solid var(--accent);
     border-radius: 14px;
-    padding: 0.65rem 1.3rem;
-    font-weight: 700;
-    transition: 0.2s;
+}
+.mood-strip .emoji { font-size: 1.8rem; }
+.mood-strip .name  { font-weight: 700; color: var(--accent) !important; }
+.mood-strip .desc  { color: var(--text) !important; }
+
+/* ---------- Alerts (info / success / error / warning) ---------- */
+div[data-testid="stAlert"] {
+    background: var(--surface) !important;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+}
+div[data-testid="stAlert"] *,
+div[data-testid="stAlert"] p {
+    color: var(--text) !important;
 }
 
-.stButton > button:hover {
-    background: linear-gradient(90deg, #c084fc, #9333ea);
-    border: none;
+/* ---------- Buttons ---------- */
+.stButton > button,
+.stDownloadButton > button {
+    border-radius: 14px;
+    padding: 0.6rem 1.2rem;
+    font-weight: 700;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* Emotion cards (secondary) */
+button[kind="secondary"],
+button[data-testid="stBaseButton-secondary"] {
+    background: var(--surface) !important;
+    color: var(--text) !important;
+    border: 1px solid var(--border) !important;
+}
+button[kind="secondary"]:hover,
+button[data-testid="stBaseButton-secondary"]:hover {
+    border-color: var(--accent) !important;
+    color: var(--accent) !important;
     transform: translateY(-2px);
 }
 
-/* Input boxes */
-.stTextInput input {
-    background-color: #292044;
-    color: white;
-    border-radius: 12px;
+/* Selected card + main action (primary) */
+button[kind="primary"],
+button[data-testid="stBaseButton-primary"] {
+    background: var(--accent) !important;
+    color: #1b1033 !important;
+    border: none !important;
 }
-
-/* Select boxes */
-.stSelectbox div[data-baseweb="select"] > div {
-    background-color: #292044;
-    border-radius: 12px;
+button[kind="primary"]:hover,
+button[data-testid="stBaseButton-primary"]:hover {
+    filter: brightness(1.1);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 40%, transparent);
 }
-
-/* Radio buttons */
-.stRadio {
-    background-color: #211a38;
-    padding: 15px;
-    border-radius: 14px;
+button[kind="primary"] *,
+button[data-testid="stBaseButton-primary"] * {
+    color: #1b1033 !important;
 }
 
 /* Download buttons */
 .stDownloadButton > button {
-    border: 1px solid #a855f7;
+    background: transparent !important;
+    color: var(--text) !important;
+    border: 1px solid var(--accent) !important;
+}
+.stDownloadButton > button * { color: var(--text) !important; }
+
+/* ---------- Emotion images ---------- */
+[data-testid="stImage"] img {
+    border-radius: 18px;
+    border: 2px solid var(--border);
+}
+
+/* ---------- Inputs ---------- */
+.stTextInput input {
+    background-color: var(--surface-2) !important;
+    color: var(--text) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 12px;
+}
+.stTextInput input::placeholder { color: #9d8fc4 !important; }
+.stTextInput input:focus { border-color: var(--accent) !important; }
+
+/* Radio group */
+div[role="radiogroup"] {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 12px 16px;
+    border-radius: 14px;
+}
+div[role="radiogroup"] label p { color: var(--text) !important; }
+
+/* Slider */
+div[data-testid="stSlider"] * { color: var(--text) !important; }
+div[data-testid="stSlider"] [role="slider"] { background-color: var(--accent) !important; }
+div[data-testid="stTickBarMin"], div[data-testid="stTickBarMax"] { color: var(--text-soft) !important; }
+
+/* File uploader */
+section[data-testid="stFileUploaderDropzone"] {
+    background: var(--surface) !important;
+    border: 1px dashed var(--accent) !important;
+    border-radius: 14px;
+}
+section[data-testid="stFileUploaderDropzone"] * { color: var(--text) !important; }
+section[data-testid="stFileUploaderDropzone"] button {
+    background: var(--surface-2) !important;
+    border: 1px solid var(--border) !important;
+}
+
+/* Expander + code block */
+div[data-testid="stExpander"] {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+}
+div[data-testid="stExpander"] * { color: var(--text) !important; }
+pre, code { background: #0d0a1c !important; color: #f8e8ff !important; }
+
+/* Result card (bordered container) */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    background: var(--surface);
+    border: 1px solid var(--accent) !important;
+    border-radius: 20px;
+    padding: 8px 10px;
+}
+
+/* ---------- Dark mode without config.toml ---------- */
+:root { color-scheme: dark; }
+
+/* Text input wrapper (the visible box around the input) */
+div[data-baseweb="input"],
+div[data-baseweb="base-input"] {
+    background-color: var(--surface-2) !important;
     border-radius: 12px;
 }
 
-/* Dividers */
-hr {
-    border-color: #594477;
-}
+/* Widget labels */
+[data-testid="stWidgetLabel"] p,
+[data-testid="stWidgetLabel"] label { color: var(--text) !important; }
 
+/* Spinner and status text */
+div[data-testid="stSpinner"] * { color: var(--text) !important; }
+
+/* Radio dots */
+div[role="radiogroup"] label > div:first-child { border-color: var(--accent) !important; }
+
+/* Audio player */
+audio { width: 100%; border-radius: 12px; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-# st.title("🎭 MoodMuse")
-# st.subheader("Emotion-Controlled Story, Text and Music Generator")
 
-# MoodMuse Title Banner
-background_path = BASE_DIR / "assets" / "moodmuse_bg.jpeg"
+# ---------------------------------------------------------------------------
+# HERO BANNER
+# ---------------------------------------------------------------------------
 
-import base64
+if BANNER_PATH.is_file():
+    banner_css = (
+        "linear-gradient(rgba(25,10,50,0.60), rgba(25,10,50,0.72)), "
+        f"url('data:image/jpeg;base64,{load_banner_base64(str(BANNER_PATH))}')"
+    )
+else:
+    banner_css = "linear-gradient(135deg, #2b1458, #4c1d95)"
 
-with open(background_path, "rb") as image_file:
-    encoded_image = base64.b64encode(image_file.read()).decode()
+st.markdown(
+    f"""
+    <div class="hero" style="background:{banner_css}; background-size:cover; background-position:center;">
+        <h1>🎭 MoodMuse</h1>
+        <p class="tagline">Turn your emotions into stories, words and music.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-st.markdown(f"""
-<div style="
-    text-align:center;
-    padding:30px 15px;
-    background:
-        linear-gradient(rgba(35,15,60,0.55), rgba(35,15,60,0.55)),
-        url('data:image/jpeg;base64,{encoded_image}');
-    background-size:cover;
-    background-position:center;
-    border:1px solid #8b5cf6;
-    border-radius:22px;
-    margin-bottom:25px;
-">
-    <h1 style="color:white !important; margin:0;">
-        🎭 MoodMuse
-    </h1>
-    <p style="font-size:18px; color:#eadcff;">
-        Turn your emotions into stories, words and music.
-    </p>
-    <p style="font-size:13px; color:#d6c3f2;">
-        YOUR EMOTIONS. YOUR CREATIVITY. YOUR WORLD.
-    </p>
-</div>
-""", unsafe_allow_html=True)
-# st.write(
-#     st.session_state.generated_content)
 
-st.divider()
-
-# emotion = st.selectbox(
-#     "Choose an emotion",
-#     options=list(EMOTIONS.keys()),
-#     format_func=lambda value: f"{EMOTIONS[value]['emoji']} {value}",
-# )
-# st.write(EMOTIONS[emotion]["description"])
-
+# ---------------------------------------------------------------------------
 # EMOTION SELECTION CARDS
+# ---------------------------------------------------------------------------
 
 st.markdown("### ✨ How are you feeling today?")
-st.caption("Choose an emotion to personalise your experience.")
+st.caption("Pick a mood. The whole page will follow it.")
 
-if "selected_emotion" not in st.session_state:
-    st.session_state.selected_emotion = "Happy"
+columns = st.columns(5, gap="medium")
 
-emotions = list(EMOTIONS.keys())
-columns = st.columns(5)
+for col, (name, info) in zip(columns, EMOTIONS.items()):
+    with col:
+        if info["image"].is_file():
+            st.image(load_square_image(str(info["image"])), use_container_width=True)
+        else:
+            st.markdown(
+                f"<div style='aspect-ratio:1;display:flex;align-items:center;"
+                f"justify-content:center;font-size:3rem;background:#211a38;"
+                f"border:2px solid #3d3060;border-radius:18px;'>{info['emoji']}</div>",
+                unsafe_allow_html=True,
+            )
 
-for i, emotion_option in enumerate(emotions):
-    with columns[i]:
-
-        # Display emotion picture
-        image_path = EMOTION_IMAGES[emotion_option]
-
-        # if image_path.is_file():
-        #     st.image(str(image_path), use_container_width=True)
-        # else:
-        #     st.warning(f"Image missing: {emotion_option}")
-        if image_path.is_file():
-            img = Image.open(image_path).convert("RGB")
-
-            # Crop all images to a square (1:1) ratio
-            width, height = img.size
-            side = min(width, height)
-
-            left = (width - side) // 2
-            top = (height - side) // 2
-
-            img = img.crop((
-                left,
-                top,
-                left + side,
-                top + side
-            ))
-
-            st.image(img, use_container_width=True)
-
-        # Clickable selection button
-        selected = st.session_state.selected_emotion == emotion_option
-
+        is_selected = st.session_state.selected_emotion == name
         if st.button(
-            f"✓ {emotion_option}" if selected else emotion_option,
-            key=f"emotion_card_{emotion_option}",
-            type="primary" if selected else "secondary",
+            f"✓ {name}" if is_selected else name,
+            key=f"emotion_card_{name}",
+            type="primary" if is_selected else "secondary",
             use_container_width=True,
         ):
-            st.session_state.selected_emotion = emotion_option
+            st.session_state.selected_emotion = name
             st.rerun()
 
 emotion = st.session_state.selected_emotion
 
-st.info(
-    f"{emotion}: {EMOTIONS[emotion]['description']}"
+st.markdown(
+    f"""
+    <div class="mood-strip">
+        <span class="emoji">{EMOTIONS[emotion]['emoji']}</span>
+        <div>
+            <span class="name">{emotion}</span>
+            <span class="desc"> — {EMOTIONS[emotion]['description']}</span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 
-content_type = st.radio(
-    "What would you like the AI to create?",
-    options=["Story", "Text", "Music"],
-    horizontal=True,
-)
+# ---------------------------------------------------------------------------
+# OPTIONS
+# ---------------------------------------------------------------------------
 
-topic = st.text_input(
-    "Enter a topic (optional)",
-    placeholder="e.g. friendship, exams, adventure, nature",
-)
+left, right = st.columns([1, 1], gap="large")
+
+with left:
+    content_type = st.radio(
+        "What would you like the AI to create?",
+        options=["Story", "Text", "Music"],
+        horizontal=True,
+    )
+
+with right:
+    topic = st.text_input(
+        "Topic (optional)",
+        placeholder="e.g. friendship, exams, adventure, nature",
+    )
 
 if content_type == "Story":
     length = st.slider(
@@ -556,50 +709,45 @@ if st.session_state.get("generation_error"):
         st.code(st.session_state["generation_error"])
 
 
+# ---------------------------------------------------------------------------
+# RESULT
+# ---------------------------------------------------------------------------
+
 if st.session_state.get("result"):
     result = st.session_state["result"]
     result_emotion = st.session_state["result_emotion"]
     result_type = st.session_state["result_type"]
 
     st.divider()
-    st.subheader(
-        f"{EMOTIONS[result_emotion]['emoji']} AI-Generated {result_type}"
-    )
-    st.markdown(result)
 
-    # Music playback
+    with st.container(border=True):
+        st.subheader(
+            f"{EMOTIONS[result_emotion]['emoji']} Your {result_emotion.lower()} {result_type.lower()}"
+        )
+        st.markdown(result)
+
     if result_type == "Music":
         show_music_player(result_emotion)
 
-    # Story and Text narration
     elif result_type in ["Story", "Text"]:
-
-        if st.button("🔊 Generate Narration"):
+        if st.button("🔊 Generate narration"):
             try:
                 with st.spinner("Generating audio narration..."):
                     audio_data = generate_narration(result)
-
                 st.session_state["narration_audio"] = audio_data
-
             except Exception as error:
                 st.error(f"Narration failed: {error}")
 
         if st.session_state.get("narration_audio"):
-            st.subheader("🎧 Listen to Narration")
-
-            st.audio(
-                st.session_state["narration_audio"],
-                format="audio/mp3"
-            )
-
+            st.markdown("#### 🎧 Listen to narration")
+            st.audio(st.session_state["narration_audio"], format="audio/mp3")
             st.download_button(
-                "⬇️ Download Narration",
+                "⬇️ Download narration",
                 data=st.session_state["narration_audio"],
                 file_name="moodmuse_narration.mp3",
-                mime="audio/mpeg"
+                mime="audio/mpeg",
             )
 
-    # Download generated text
     st.download_button(
         label="⬇️ Download generated content",
         data=result,
@@ -608,4 +756,4 @@ if st.session_state.get("result"):
     )
 
 st.divider()
-st.caption("MoodMuse | Generative AI  | Python, Streamlit and Gemini")
+st.caption("MoodMuse | Generative AI | Python, Streamlit and Gemini")
